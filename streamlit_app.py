@@ -1,63 +1,113 @@
-import streamlit as st
-import SimpleITK as sitk
-import pandas as pd
-import numpy as np
 import os
-import tempfile
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
+import pydicom
+import streamlit as st
 
-# Function to load DICOM series using SimpleITK
-def load_dicom_series(dicom_files):
-    series_reader = sitk.ImageSeriesReader()
-    series_reader.SetFileNames(dicom_files)
-    image = series_reader.Execute()
-    return sitk.GetArrayFromImage(image)
+# Streamlit app title
+st.title("DICOM CT Slices and RT Files Uploader with Independent Slice Scrolling")
 
-# Read metadata using SimpleITK
-def read_dicom_metadata(dicom_files):
-    ds = sitk.ReadImage(dicom_files[0])  # Reading metadata from the first file
-    metadata = {tag: ds.GetMetaData(tag) for tag in ds.GetMetaDataKeys()}
-    return metadata
-
-# Function to display CT slices in 3 axes
-def display_ct_slices(image):
-    axial_slice = image[image.shape[0] // 2, :, :]
-    sagittal_slice = image[:, image.shape[1] // 2, :]
-    coronal_slice = image[:, :, image.shape[2] // 2]
-    st.image(axial_slice, caption="Axial View", use_column_width=True, clamp=True, channels="GRAY")
-    st.image(sagittal_slice, caption="Sagittal View", use_column_width=True, clamp=True, channels="GRAY")
-    st.image(coronal_slice, caption="Coronal View", use_column_width=True, clamp=True, channels="GRAY")
-
-# Display metadata in a table
-def display_metadata(metadata):
-    df = pd.DataFrame(list(metadata.items()), columns=["Tag", "Value"])
-    st.dataframe(df)
-
-# Streamlit app
-st.title("DICOM CT Viewer with Metadata")
+# Temporary directory for saving uploaded files
+temp_dir = "temp_dicom"
+if not os.path.exists(temp_dir):
+    os.makedirs(temp_dir)
 
 # Drag and drop file uploader
-uploaded_files = st.file_uploader("Upload DICOM Files", type=["dcm"], accept_multiple_files=True)
+uploaded_files = st.file_uploader(
+    "Upload DICOM CT Slices, RT Dose, RT Structure, and RT Plan files",
+    type=["dcm"],
+    accept_multiple_files=True
+)
 
+# Save uploaded files to the temp folder
 if uploaded_files:
-    # Save uploaded files to a temporary directory
-    temp_dir = tempfile.mkdtemp()
-    dicom_files = []
-
     for uploaded_file in uploaded_files:
-        file_path = os.path.join(temp_dir, uploaded_file.name)
+        file_name = uploaded_file.name
+        file_path = os.path.join(temp_dir, file_name)
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
-        dicom_files.append(file_path)
 
-    if dicom_files:
-        st.write("Loading DICOM series...")
+    st.success(f"Uploaded {len(uploaded_files)} files successfully!")
 
-        # Load DICOM images
-        image = load_dicom_series(dicom_files)
+# Process and display CT slices with a slider
+def load_and_display_ct_slices(temp_dir):
+    # Load the DICOM files
+    dicom_files = glob.glob(os.path.join(temp_dir, "*.dcm"))
+    files = []
+    for fname in dicom_files:
+        files.append(pydicom.dcmread(fname))
 
-        # Display slices
-        display_ct_slices(image)
+    if not files:
+        st.error("No DICOM files found.")
+        return
 
-        # Read and display metadata
-        metadata = read_dicom_metadata(dicom_files)
-        display_metadata(metadata)
+    # Skip files with no SliceLocation (e.g., scout views)
+    slices = []
+    skipcount = 0
+    for f in files:
+        if hasattr(f, "SliceLocation"):
+            slices.append(f)
+        else:
+            skipcount += 1
+
+    if not slices:
+        st.error("No valid CT slices found.")
+        return
+
+    # Ensure they are in the correct order
+    slices = sorted(slices, key=lambda s: s.SliceLocation)
+
+    # Pixel aspects, assuming all slices are the same
+    ps = slices[0].PixelSpacing
+    ss = slices[0].SliceThickness
+    ax_aspect = ps[1] / ps[0]
+    sag_aspect = ss / ps[0]  # Corrected aspect for sagittal view
+    cor_aspect = ss / ps[0]
+
+    # Create 3D array
+    img_shape = list(slices[0].pixel_array.shape)
+    img_shape.append(len(slices))
+    img3d = np.zeros(img_shape)
+
+    # Fill 3D array with the images from the files
+    for i, s in enumerate(slices):
+        img2d = s.pixel_array
+        img3d[:, :, i] = img2d
+
+    # Add sliders for axial, sagittal, and coronal slices
+    axial_slider = st.slider("Select Axial Slice", 0, img_shape[2] - 1, img_shape[2] // 2)
+    sagittal_slider = st.slider("Select Sagittal Slice", 0, img_shape[0] - 1, img_shape[0] // 2)
+    coronal_slider = st.slider("Select Coronal Slice", 0, img_shape[1] - 1, img_shape[1] // 2)
+
+    # Plot 3 orthogonal slices with independent sliders
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Axial slice
+    axes[0].imshow(img3d[:, :, axial_slider], cmap='gray')
+    axes[0].set_aspect(ax_aspect)
+    axes[0].set_title(f"Axial Slice {axial_slider+1}/{img_shape[2]}")
+
+    # Sagittal slice (now rotated and properly scaled)
+    sagittal_view = np.rot90(img3d[sagittal_slider, :, :])
+    axes[1].imshow(sagittal_view, cmap='gray')
+    axes[1].set_aspect(sag_aspect)
+    axes[1].set_title(f"Sagittal Slice {sagittal_slider+1}/{img_shape[0]}")
+
+    # Coronal slice (proper scaling and orientation)
+    coronal_view = np.rot90(img3d[:, coronal_slider, :])
+    axes[2].imshow(coronal_view, cmap='gray')
+    axes[2].set_aspect(cor_aspect)
+    axes[2].set_title(f"Coronal Slice {coronal_slider+1}/{img_shape[1]}")
+
+    # Remove axes labels
+    for ax in axes:
+        ax.axis('off')
+
+    st.pyplot(fig)
+
+# Display CT slices if files are uploaded
+if uploaded_files:
+    load_and_display_ct_slices(temp_dir)
+else:
+    st.info("Please upload DICOM CT slices, RT Dose, RT Structure, and RT Plan files.")
