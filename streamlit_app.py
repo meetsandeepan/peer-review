@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pydicom
 import streamlit as st
+from pydicom.data import get_testdata_file
+
 
 # Streamlit app title
 st.title("DICOM CT Slices and RT Files Uploader with Independent Slice Scrolling")
@@ -111,3 +113,41 @@ if uploaded_files:
     load_and_display_ct_slices(temp_dir)
 else:
     st.info("Please upload DICOM CT slices, RT Dose, RT Structure, and RT Plan files.")
+
+# Function to list the RT Plan beams
+def list_beams(ds: pydicom.Dataset) -> str:
+    """Summarizes the RTPLAN beam information in the dataset."""
+    lines = [f"{'Beam name':^13s} {'Number':^8s} {'Gantry':^8s} {'SSD (cm)':^11s}"]
+    for beam in ds.BeamSequence:
+        cp0 = beam.ControlPointSequence[0]
+        ssd = float(cp0.SourceToSurfaceDistance / 10)
+        lines.append(
+            f"{beam.BeamName:^13s} {beam.BeamNumber:8d} {cp0.GantryAngle:8.1f} {ssd:8.1f}"
+        )
+    return "\n".join(lines)
+
+# Function to load RT Plan and extract tags
+def load_rt_plan_and_extract_tags(temp_dir):
+    rt_plan_file = None
+    # Find RT Plan file in the temp directory
+    for file_name in os.listdir(temp_dir):
+        if "RTPLAN" in file_name.upper():
+            rt_plan_file = os.path.join(temp_dir, file_name)
+            break
+
+    if rt_plan_file:
+        # Read the RT Plan DICOM file
+        ds = pydicom.dcmread(rt_plan_file)
+        # Display the beam information
+        beam_info = list_beams(ds)
+        st.text("RT Plan Beam Information:")
+        st.text(beam_info)
+    else:
+        st.error("RT Plan file not found.")
+
+# Call the function to read and display RT Plan information if files are uploaded
+if uploaded_files:
+    st.header("RT Plan Information")
+    load_rt_plan_and_extract_tags(temp_dir)
+else:
+    st.info("Please upload the RT Plan file.")
